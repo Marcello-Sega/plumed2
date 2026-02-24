@@ -1105,18 +1105,34 @@ PBMetaD::PBMetaD(const ActionOptions& ao):
 }
 
 void PBMetaD::readGaussians(unsigned iarg, IFile *ifile) {
-  std::vector<double> center(1);
-  std::vector<double> sigma(1);
+  const int family = pfs_[iarg];
+
+  // Determine dimensionality of this family from the partition map (pfs_)
+  const unsigned ncv = getNumberOfArguments();
+  std::vector<unsigned> famIdx;
+  famIdx.reserve(ncv);
+  for(unsigned j=0; j<ncv; ++j) {
+    if(pfs_[j]==family) famIdx.push_back(j);
+  }
+  const unsigned d = famIdx.size();
+  plumed_assert(d>0);
+
+  // Buffers for one hill
+  std::vector<double> center(d);
+  std::vector<double> sigma(d);   // resized inside scanOneHill for multivariate
   double height;
   int nhills=0;
   bool multivariate=false;
-  int family=pfs_[iarg];
 
+  // Temporary Values used by scanOneHill to read fields and validate periodicity
   std::vector<Value> tmpvalues;
-  tmpvalues.push_back( Value( this, pfhold_[family]->getName(), false ) );
+  tmpvalues.reserve(d);
+  for(unsigned k=0; k<d; ++k) {
+    Value* ap = getPntrToArgument(famIdx[k]);
+    tmpvalues.push_back( Value( this, ap->getName(), false ) );
+  }
 
   while(scanOneHill(iarg,ifile,tmpvalues,center,sigma,height,multivariate)) {
-    ;
     nhills++;
     if(welltemp_) {
       height*=(biasf_-1.0)/biasf_;
@@ -1127,31 +1143,93 @@ void PBMetaD::readGaussians(unsigned iarg, IFile *ifile) {
 }
 
 void PBMetaD::writeGaussian(unsigned iarg, const Gaussian& hill, OFile *ofile) {
-  int family=pfs_[iarg];
-  ofile->printField("time",getTimeStep()*getStep());
-  ofile->printField(pfhold_[family],hill.center[0]);
+  const int family = pfs_[iarg];
+  const unsigned ncv = getNumberOfArguments();
 
-  ofile->printField("kerneltype","stretched-gaussian");
-  if(hill.multivariate) {
-    ofile->printField("multivariate","true");
-    double lower = std::sqrt(1./hill.sigma[0]);
-    ofile->printField("sigma_"+pfhold_[family]->getName()+"_"+
-                      pfhold_[family]->getName(),lower);
-  } else {
-    ofile->printField("multivariate","false");
-    ofile->printField("sigma_"+pfhold_[family]->getName(),hill.sigma[0]);
+  // Collect all CVs belonging to this family, in argument order
+  std::vector<unsigned> famIdx;
+  std::vector<Value*>   famArgs;
+  famIdx.reserve(ncv);
+  famArgs.reserve(ncv);
+  for (unsigned j = 0; j < ncv; ++j) {
+    if (pfs_[j] == family) {
+      famIdx.push_back(j);
+      famArgs.push_back(getPntrToArgument(j));
+    }
   }
-  double height=hill.height;
-  if(welltemp_) {
+  const unsigned d = famArgs.size();
+  plumed_assert(d > 0);
+
+  // Sanity check: hill dimensions must match family dimension
+  plumed_assert(hill.center.size() == d);
+  if (!hill.multivariate) {
+    plumed_assert(hill.sigma.size() == d);
+  } else {
+    plumed_assert(hill.sigma.size() == d*(d+1)/2);
+  }
+
+  ofile->printField("time", getTimeStep()*getStep());
+
+  // Print centers for all CVs in this family
+  for (unsigned k = 0; k < d; ++k) {
+    ofile->printField(famArgs[k], hill.center[k]);
+  }
+
+  ofile->printField("kerneltype", "stretched-gaussian");
+
+  if (hill.multivariate) {
+    ofile->printField("multivariate", "true");
+
+    // hill.sigma is stored as packed symmetric precision matrix (upper triangle)
+    Matrix<double> P(d, d);
+    unsigned kk = 0;
+    for (unsigned r = 0; r < d; ++r) {
+      for (unsigned c = r; c < d; ++c) {
+        P(r, c) = P(c, r) = hill.sigma[kk++];
+      }
+    }
+
+    // Invert precision to get covariance
+    Matrix<double> C(d, d);
+    Invert(P, C);
+
+    // Enforce symmetry (numerical safety)
+    for (unsigned r = 0; r < d; ++r) {
+      for (unsigned c = r; c < d; ++c) {
+        C(r, c) = C(c, r);
+      }
+    }
+
+    // Cholesky so we can write "sigma-like" numbers (lower triangular L with C = L L^T)
+    Matrix<double> L(d, d);
+    cholesky(C, L);
+
+    // Write lower-triangular entries in the same “band form” as MetaD.cpp
+    for (unsigned c = 0; c < d; ++c) {
+      for (unsigned r = c; r < d; ++r) {
+        ofile->printField("sigma_" + famArgs[r]->getName() + "_" + famArgs[c]->getName(),
+                          L(r, c));
+      }
+    }
+  } else {
+    ofile->printField("multivariate", "false");
+    for (unsigned k = 0; k < d; ++k) {
+      ofile->printField("sigma_" + famArgs[k]->getName(), hill.sigma[k]);
+    }
+  }
+
+  double height = hill.height;
+  if (welltemp_) {
     height *= biasf_/(biasf_-1.0);
   }
-  ofile->printField("height",height);
-  ofile->printField("biasf",biasf_);
-  if(mw_n_>1) {
-    ofile->printField("clock",int(std::time(0)));
+  ofile->printField("height", height);
+  ofile->printField("biasf", biasf_);
+  if (mw_n_ > 1) {
+    ofile->printField("clock", int(std::time(0)));
   }
   ofile->printField();
 }
+
 
 void PBMetaD::addGaussian(unsigned iarg, const Gaussian& hill) {
   if(!grid_) {
@@ -1498,69 +1576,126 @@ void PBMetaD::update() {
 }
 
 /// takes a pointer to the file and a template string with values v and gives back the next center, sigma and height
-bool PBMetaD::scanOneHill(unsigned iarg, IFile *ifile, std::vector<Value> &tmpvalues, std::vector<double> &center, std::vector<double> &sigma, double &height, bool &multivariate) {
+bool PBMetaD::scanOneHill(unsigned iarg, IFile *ifile,
+                          std::vector<Value> &tmpvalues,
+                          std::vector<double> &center,
+                          std::vector<double> &sigma,
+                          double &height,
+                          bool &multivariate) {
   double dummy;
   multivariate=false;
-  Value* argPtr = pfhold_[pfs_[iarg]];
-  if(ifile->scanField("time",dummy)) {
-    ifile->scanField( &tmpvalues[0] );
-    if( tmpvalues[0].isPeriodic() && ! argPtr->isPeriodic() ) {
-      error("in hills file periodicity for variable " + tmpvalues[0].getName() + " does not match periodicity in input");
-    } else if( tmpvalues[0].isPeriodic() ) {
-      std::string imin, imax;
-      tmpvalues[0].getDomain( imin, imax );
-      std::string rmin, rmax;
-      argPtr->getDomain( rmin, rmax );
-      if( imin!=rmin || imax!=rmax ) {
-        error("in hills file periodicity for variable " + tmpvalues[0].getName() + " does not match periodicity in input");
-      }
+
+  const int family = pfs_[iarg];
+
+  // Collect all CVs belonging to this family, in argument order.
+  const unsigned ncv = getNumberOfArguments();
+  std::vector<unsigned> famIdx;
+  famIdx.reserve(ncv);
+  for (unsigned j = 0; j < ncv; ++j) {
+    if (pfs_[j] == family) famIdx.push_back(j);
+  }
+  const unsigned d = famIdx.size();
+  plumed_assert(d > 0);
+
+  // Ensure buffers match the family dimensionality
+  if (tmpvalues.size() != d) {
+    tmpvalues.clear();
+    tmpvalues.reserve(d);
+    for (unsigned k = 0; k < d; ++k) {
+      Value* ap = getPntrToArgument(famIdx[k]);
+      tmpvalues.push_back( Value(this, ap->getName(), false) );
     }
-    center[0]=tmpvalues[0].get();
-    std::string ktype="stretched-gaussian";
-    if( ifile->FieldExist("kerneltype") ) {
-      ifile->scanField("kerneltype",ktype);
+  }
+  if (center.size() != d) center.assign(d, 0.0);
+  if (sigma.size()  != d) sigma.assign(d, 0.0);  // resized later for multivariate
+
+  if(ifile->scanField("time",dummy)) {
+
+    // Read centers + periodicity checks for all CVs in family
+    for (unsigned k = 0; k < d; ++k) {
+      Value* argPtr = getPntrToArgument(famIdx[k]);
+      ifile->scanField(&tmpvalues[k]);
+
+      if (tmpvalues[k].isPeriodic() && !argPtr->isPeriodic()) {
+        error("in hills file periodicity for variable " + tmpvalues[k].getName() +
+              " does not match periodicity in input");
+      } else if (tmpvalues[k].isPeriodic()) {
+        std::string imin, imax;
+        tmpvalues[k].getDomain(imin, imax);
+        std::string rmin, rmax;
+        argPtr->getDomain(rmin, rmax);
+        if (imin != rmin || imax != rmax) {
+          error("in hills file periodicity for variable " + tmpvalues[k].getName() +
+                " does not match periodicity in input");
+        }
+      }
+      center[k] = tmpvalues[k].get();
     }
 
-    if( ktype=="gaussian" ) {
+    // kerneltype
+    std::string ktype="stretched-gaussian";
+    if(ifile->FieldExist("kerneltype")) ifile->scanField("kerneltype", ktype);
+    if(ktype=="gaussian") {
       noStretchWarning();
-    } else if( ktype!="stretched-gaussian") {
+    } else if(ktype!="stretched-gaussian") {
       error("non Gaussian kernels are not supported in MetaD");
     }
 
+    // multivariate flag
     std::string sss;
-    ifile->scanField("multivariate",sss);
-    if(sss=="true") {
-      multivariate=true;
-    } else if(sss=="false") {
-      multivariate=false;
-    } else {
-      plumed_merror("cannot parse multivariate = "+ sss);
-    }
+    ifile->scanField("multivariate", sss);
+    if      (sss=="true")  multivariate=true;
+    else if (sss=="false") multivariate=false;
+    else plumed_merror("cannot parse multivariate = " + sss);
+
     if(multivariate) {
-      ifile->scanField("sigma_"+argPtr->getName()+"_"+
-                       argPtr->getName(),sigma[0]);
-      sigma[0] = 1./(sigma[0]*sigma[0]);
+      // Read Cholesky factor L of covariance via fields sigma_ai_aj (i>=j),
+      // then store packed upper triangle of precision P = (L L^T)^-1 in sigma[]
+      sigma.resize(d*(d+1)/2);
+
+      Matrix<double> upper(d,d);
+      Matrix<double> lower(d,d);
+      for(unsigned i=0; i<d; i++) {
+        for(unsigned j=0; j<d-i; j++) {
+          Value* ai = getPntrToArgument(famIdx[j+i]);
+          Value* aj = getPntrToArgument(famIdx[j]);
+          ifile->scanField("sigma_"+ai->getName()+"_"+aj->getName(), lower(j+i,j));
+          upper(j,j+i) = lower(j+i,j);
+        }
+      }
+
+      Matrix<double> cov(d,d);
+      Matrix<double> invcov(d,d);
+      mult(lower, upper, cov);
+      Invert(cov, invcov);
+
+      unsigned kk=0;
+      for(unsigned r=0; r<d; r++) {
+        for(unsigned c=r; c<d; c++) {
+          sigma[kk++] = invcov(r,c);
+        }
+      }
+
     } else {
-      ifile->scanField("sigma_"+argPtr->getName(),sigma[0]);
+      for(unsigned k=0; k<d; ++k) {
+        Value* argPtr = getPntrToArgument(famIdx[k]);
+        ifile->scanField("sigma_"+argPtr->getName(), sigma[k]);
+      }
     }
-    ifile->scanField("height",height);
-    ifile->scanField("biasf",dummy);
-    if(ifile->FieldExist("clock")) {
-      ifile->scanField("clock",dummy);
-    }
-    if(ifile->FieldExist("lower_int")) {
-      ifile->scanField("lower_int",dummy);
-    }
-    if(ifile->FieldExist("upper_int")) {
-      ifile->scanField("upper_int",dummy);
-    }
+
+    ifile->scanField("height", height);
+    ifile->scanField("biasf", dummy);
+    if(ifile->FieldExist("clock"))     ifile->scanField("clock", dummy);
+    if(ifile->FieldExist("lower_int")) ifile->scanField("lower_int", dummy);
+    if(ifile->FieldExist("upper_int")) ifile->scanField("upper_int", dummy);
+
     ifile->scanField();
     return true;
   } else {
     return false;
   }
-
 }
+
 
 bool PBMetaD::checkNeedsGradients()const {
   if(adaptive_==FlexibleBin::geometry) {
