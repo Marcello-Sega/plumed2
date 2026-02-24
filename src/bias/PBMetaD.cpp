@@ -308,14 +308,28 @@ private:
   std::vector<bool>  doInt_;
   // variable for selector
   std::string selector_;
+  std::vector<std::string> gmin;
+  std::vector<std::string> gmax;
+  std::vector<unsigned> gbin;
+
   bool  do_select_;
   unsigned select_value_;
   unsigned current_value_;
 
   double stretchA=1.0;
   double stretchB=0.0;
+  bool sparsegrid=false;
+  bool nospline=false;
+  bool spline=true;
+  double tau=0.0;
+  // restart from external grid
+  bool restartedFromGrid=false;
+  std::vector<double>   gspacing;
+  std::vector<std::string> gridfilenames_;
+  std::vector<std::string> gridreadfilenames_;
 
   bool noStretchWarningDone=false;
+
 
   void noStretchWarning() {
     if(!noStretchWarningDone) {
@@ -331,6 +345,21 @@ private:
   double evaluateGaussian(unsigned iarg, const std::vector<double>&, const Gaussian&,double* der=NULL);
   std::vector<unsigned> getGaussianSupport(unsigned iarg, const Gaussian&);
   bool   scanOneHill(unsigned iarg, IFile *ifile,  std::vector<Value> &v, std::vector<double> &center, std::vector<double>  &sigma, double &height, bool &multivariate);
+  void   parse_flexible_hills();
+  void   parse_partitioned_families();
+  void   parse_sigma();
+  void   parse_vector_hill_files();
+  void   parse_bias_factor();
+  void   parse_tau();
+  void   parse_walkers();
+  void   parse_grid();
+  void   parse_interval();
+  void   populate_logs();
+  void   init_grid();
+  void   init_file_descriptors();
+  void   init_hill_files();
+  void   dump_grid();
+  void   final_logs();
 
 public:
   explicit PBMetaD(const ActionOptions&);
@@ -342,65 +371,7 @@ public:
 
 PLUMED_REGISTER_ACTION(PBMetaD,"PBMETAD")
 
-void PBMetaD::registerKeywords(Keywords& keys) {
-  Bias::registerKeywords(keys);
-  keys.add("compulsory","SIGMA","the widths of the Gaussian hills");
-  keys.add("compulsory","PACE","the frequency for hill addition, one for all biases");
-  keys.add("optional","FILE","files in which the lists of added hills are stored, default names are assigned using arguments if FILE is not found");
-  keys.add("optional","HEIGHT","the height of the Gaussian hills, one for all biases. Compulsory unless TAU, TEMP and BIASFACTOR are given");
-  keys.add("optional","FMT","specify format for HILLS files (useful for decrease the number of digits in regtests)");
-  keys.add("optional","BIASFACTOR","use well tempered metadynamics with this bias factor, one for all biases.  Please note you must also specify temp");
-  keys.add("optional","TEMP","the system temperature - this is only needed if you are doing well-tempered metadynamics");
-  keys.add("optional","TAU","in well tempered metadynamics, sets height to (k_B Delta T*pace*timestep)/tau");
-  keys.add("optional","GRID_MIN","the lower bounds for the grid");
-  keys.add("optional","GRID_MAX","the upper bounds for the grid");
-  keys.add("optional","GRID_BIN","the number of bins for the grid");
-  keys.add("optional","GRID_SPACING","the approximate grid spacing (to be used as an alternative or together with GRID_BIN)");
-  keys.addFlag("GRID_SPARSE",false,"use a sparse grid to store hills");
-  keys.addFlag("GRID_NOSPLINE",false,"don't use spline interpolation with grids");
-  keys.add("optional","GRID_WSTRIDE", "frequency for dumping the grid");
-  keys.add("optional","GRID_WFILES", "dump grid for the bias, default names are used if GRID_WSTRIDE is used without GRID_WFILES.");
-  keys.add("optional","GRID_RFILES", "read grid for the bias");
-  keys.add("optional","ADAPTIVE","use a geometric (=GEOM) or diffusion (=DIFF) based hills width scheme. Sigma is one number that has distance units or timestep dimensions");
-  keys.add("optional","SIGMA_MAX","the upper bounds for the sigmas (in CV units) when using adaptive hills. Negative number means no bounds ");
-  keys.add("optional","SIGMA_MIN","the lower bounds for the sigmas (in CV units) when using adaptive hills. Negative number means no bounds ");
-  keys.addInputKeyword("numbered","PF", "scalar", "specify which CVs belong in a partitioned family. Once a PF is specified, all CVs in ARG must be placed in a PF even if there is one CV per PF”");
-  keys.add("optional","SELECTOR", "add forces and do update based on the value of SELECTOR");
-  keys.add("optional","SELECTOR_ID", "value of SELECTOR");
-  keys.add("optional","WALKERS_ID", "walker id");
-  keys.add("optional","WALKERS_N", "number of walkers");
-  keys.add("optional","WALKERS_DIR", "shared directory with the hills files from all the walkers");
-  keys.add("optional","WALKERS_RSTRIDE","stride for reading hills files");
-  keys.addFlag("WALKERS_MPI",false,"Switch on MPI version of multiple walkers - not compatible with WALKERS_* options other than WALKERS_DIR");
-  keys.add("optional","INTERVAL_MIN","one dimensional lower limits, outside the limits the system will not feel the biasing force.");
-  keys.add("optional","INTERVAL_MAX","one dimensional upper limits, outside the limits the system will not feel the biasing force.");
-  keys.use("RESTART");
-  keys.use("UPDATE_FROM");
-  keys.use("UPDATE_UNTIL");
-  keys.addDOI("10.1021/acs.jctc.5b00846");
-  keys.addDOI("10.1103/PhysRevLett.100.020603");
-  keys.addDOI("10.1021/ct3002464");
-  keys.addDOI("10.2174/1877946811202010079");
-  keys.addDOI("10.1021/acs.jctc.8b00448");
-  keys.addDOI("10.1021/jp054359r");
-}
-
-PBMetaD::PBMetaD(const ActionOptions& ao):
-  PLUMED_BIAS_INIT(ao),
-  kbt_(0.0),
-  stride_(0),
-  welltemp_(false),
-  biasf_(1.0),
-  isFirstStep_(true),
-  height0_(std::numeric_limits<double>::max()),
-  adaptive_(FlexibleBin::none),
-  grid_(false),
-  wgridstride_(0),
-  pf_n_(0), do_pf_(false),
-  mw_n_(1), mw_dir_(""), mw_id_(0), mw_rstride_(1),
-  walkers_mpi_(false), mpi_nw_(0),
-  do_select_(false) {
-
+void PBMetaD::parse_flexible_hills() {
   // parse the flexible hills
   std::string adaptiveoption;
   adaptiveoption="NONE";
@@ -416,9 +387,9 @@ PBMetaD::PBMetaD(const ActionOptions& ao):
   } else {
     error("I do not know this type of adaptive scheme");
   }
+}
 
-  parse("FMT",fmt_);
-
+void PBMetaD::parse_partitioned_families() { 
   // Partitioned Families - fill with -1 to mark as invalid
   pfs_.assign(getNumberOfArguments(), -1);
   pfhold_.resize(getNumberOfArguments());
@@ -471,6 +442,10 @@ PBMetaD::PBMetaD(const ActionOptions& ao):
       }
     }
   }
+}
+
+
+void PBMetaD::parse_sigma(){
 
   // parse the sigma
   parseVector("SIGMA",sigma0_);
@@ -519,15 +494,9 @@ PBMetaD::PBMetaD(const ActionOptions& ao):
       flexbin_.push_back(FlexibleBin(adaptive_,this,i,sigma0_[0],tmp_smin,tmp_smax));
     }
   }
+}
 
-  // note: HEIGHT is not compulsory, since one could use the TAU keyword, see below
-  parse("HEIGHT",height0_);
-  parse("PACE",stride_);
-  if(stride_<=0) {
-    error("frequency for hill addition is nonsensical");
-  }
-
-
+void PBMetaD::parse_vector_hill_files() { 
   parseVector("FILE",hillsfname_);
   if(hillsfname_.size()==0) {
     for(unsigned i=0; i< pf_n_; i++) {
@@ -538,7 +507,9 @@ PBMetaD::PBMetaD(const ActionOptions& ao):
   if( hillsfname_.size()!=pf_n_ ) {
     error("number of FILE arguments does not match number of HILLS files");
   }
+}
 
+void PBMetaD::parse_bias_factor() {
   parse("BIASFACTOR",biasf_);
   if( biasf_<1.0 ) {
     error("well tempered bias factor is nonsensical");
@@ -550,7 +521,9 @@ PBMetaD::PBMetaD(const ActionOptions& ao):
     }
     welltemp_=true;
   }
-  double tau=0.0;
+}
+
+void PBMetaD::parse_tau() {
   parse("TAU",tau);
   if(tau==0.0) {
     if(height0_==std::numeric_limits<double>::max()) {
@@ -569,8 +542,9 @@ PBMetaD::PBMetaD(const ActionOptions& ao):
     }
     height0_=(kbt_*(biasf_-1.0))/tau*getTimeStep()*stride_;
   }
+}
 
-
+void PBMetaD::parse_walkers() { 
   // Multiple walkers
   parse("WALKERS_N",mw_n_);
   parse("WALKERS_ID",mw_id_);
@@ -582,10 +556,12 @@ PBMetaD::PBMetaD(const ActionOptions& ao):
 
   // MPI version
   parseFlag("WALKERS_MPI",walkers_mpi_);
+}
 
+
+void PBMetaD::parse_grid() {
   // Grid file
   parse("GRID_WSTRIDE",wgridstride_);
-  std::vector<std::string> gridfilenames_;
   parseVector("GRID_WFILES",gridfilenames_);
   if (wgridstride_ == 0 && gridfilenames_.size() > 0) {
     error("frequency with which to output grid not specified use GRID_WSTRIDE");
@@ -601,22 +577,17 @@ PBMetaD::PBMetaD(const ActionOptions& ao):
   }
 
   // Read grid
-  std::vector<std::string> gridreadfilenames_;
   parseVector("GRID_RFILES",gridreadfilenames_);
 
   // Grid Stuff
-  std::vector<std::string> gmin(pf_n_);
   parseVector("GRID_MIN",gmin);
   if(gmin.size()!=pf_n_ && gmin.size()!=0) {
     error("not enough values for GRID_MIN");
   }
-  std::vector<std::string> gmax(pf_n_);
   parseVector("GRID_MAX",gmax);
   if(gmax.size()!=pf_n_ && gmax.size()!=0) {
     error("not enough values for GRID_MAX");
   }
-  std::vector<unsigned> gbin(pf_n_);
-  std::vector<double>   gspacing;
   parseVector("GRID_BIN",gbin);
   if(gbin.size()!=pf_n_ && gbin.size()!=0) {
     error("not enough values for GRID_BIN");
@@ -679,19 +650,19 @@ PBMetaD::PBMetaD(const ActionOptions& ao):
     grid_=true;
   }
 
-  bool sparsegrid=false;
   parseFlag("GRID_SPARSE",sparsegrid);
-  bool nospline=false;
   parseFlag("GRID_NOSPLINE",nospline);
-  bool spline=!nospline;
+  spline=!nospline;
+
   if(!grid_&&gridfilenames_.size() > 0) {
     error("To write a grid you need first to define it!");
   }
   if(!grid_&&gridreadfilenames_.size() > 0) {
     error("To read a grid you need first to define it!");
   }
+}
 
-  doInt_.resize(pf_n_,false);
+void PBMetaD::parse_interval() { 
   // Interval keyword
   parseVector("INTERVAL_MIN",lowI_);
   parseVector("INTERVAL_MAX",uppI_);
@@ -712,17 +683,9 @@ PBMetaD::PBMetaD(const ActionOptions& ao):
       doInt_[i]=true;
     }
   }
+}
 
-  // parse selector stuff
-  parse("SELECTOR", selector_);
-  if(selector_.length()>0) {
-    do_select_ = true;
-    select_value_ = 0; // set defalt value or it might be not initialized if the user does not pass SELECTOR_ID
-    parse("SELECTOR_ID", select_value_);
-  }
-
-  checkRead();
-
+void PBMetaD::populate_logs() {
   log.printf("  Gaussian width ");
   if (adaptive_==FlexibleBin::diffusion) {
     log.printf(" (Note: The units of sigma are in timesteps) ");
@@ -817,14 +780,11 @@ PBMetaD::PBMetaD(const ActionOptions& ao):
       }
     }
   }
+}
 
-  // initializing vector of hills
-  hills_.resize(pf_n_);
 
-  // restart from external grid
-  bool restartedFromGrid=false;
+void PBMetaD::init_grid(){ 
 
-  // initializing and checking grid
   if(grid_) {
     // check for mesh and sigma size
     for(unsigned i=0; i<pf_n_; i++) {
@@ -843,6 +803,7 @@ PBMetaD::PBMetaD(const ActionOptions& ao):
         }
       }
     }
+
     std::string funcl=getLabel() + ".bias";
     for(unsigned i=0; i<pf_n_; ++i) {
       std::vector<Value*> args(1);
@@ -894,9 +855,9 @@ PBMetaD::PBMetaD(const ActionOptions& ao):
       BiasGrids_.emplace_back(std::move(BiasGrid_));
     }
   }
+}
 
-
-
+void PBMetaD::init_file_descriptors() { 
 // creating vector of ifile* for hills reading
 // open all files at the beginning and read Gaussians if restarting
 
@@ -947,12 +908,9 @@ PBMetaD::PBMetaD(const ActionOptions& ao):
       }
     }
   }
+}
 
-  comm.Barrier();
-  if(comm.Get_rank()==0 && walkers_mpi_) {
-    multi_sim_comm.Barrier();
-  }
-
+void PBMetaD::init_hill_files() { 
   // open hills files for writing
   for(unsigned i=0; i<hillsfname_.size(); ++i) {
     auto ofile=Tools::make_unique<OFile>();
@@ -988,7 +946,9 @@ PBMetaD::PBMetaD(const ActionOptions& ao):
     // push back
     hillsOfiles_.emplace_back(std::move(ofile));
   }
+}
 
+void PBMetaD::dump_grid() { 
   // Dump grid to files
   if(wgridstride_ > 0) {
     for(unsigned i = 0; i < gridfilenames_.size(); ++i) {
@@ -1015,6 +975,9 @@ PBMetaD::PBMetaD(const ActionOptions& ao):
     }
   }
 
+}
+
+void PBMetaD::final_logs() {
   log<<"  Bibliography "<<plumed.cite("Pfaendtner and Bonomi. J. Chem. Theory Comput. 11, 5062 (2015)");
   if(doInt_[0])
     log<<plumed.cite(
@@ -1029,7 +992,115 @@ PBMetaD::PBMetaD(const ActionOptions& ao):
     log<<plumed.cite("Prakash, Fu, Bonomi, and Pfaendtner, J. Chem. Theory Comput. 14, 4985 (2018)");
   }
   log<<"\n";
+}
 
+
+void PBMetaD::registerKeywords(Keywords& keys) {
+  Bias::registerKeywords(keys);
+  keys.add("compulsory","SIGMA","the widths of the Gaussian hills");
+  keys.add("compulsory","PACE","the frequency for hill addition, one for all biases");
+  keys.add("optional","FILE","files in which the lists of added hills are stored, default names are assigned using arguments if FILE is not found");
+  keys.add("optional","HEIGHT","the height of the Gaussian hills, one for all biases. Compulsory unless TAU, TEMP and BIASFACTOR are given");
+  keys.add("optional","FMT","specify format for HILLS files (useful for decrease the number of digits in regtests)");
+  keys.add("optional","BIASFACTOR","use well tempered metadynamics with this bias factor, one for all biases.  Please note you must also specify temp");
+  keys.add("optional","TEMP","the system temperature - this is only needed if you are doing well-tempered metadynamics");
+  keys.add("optional","TAU","in well tempered metadynamics, sets height to (k_B Delta T*pace*timestep)/tau");
+  keys.add("optional","GRID_MIN","the lower bounds for the grid");
+  keys.add("optional","GRID_MAX","the upper bounds for the grid");
+  keys.add("optional","GRID_BIN","the number of bins for the grid");
+  keys.add("optional","GRID_SPACING","the approximate grid spacing (to be used as an alternative or together with GRID_BIN)");
+  keys.addFlag("GRID_SPARSE",false,"use a sparse grid to store hills");
+  keys.addFlag("GRID_NOSPLINE",false,"don't use spline interpolation with grids");
+  keys.add("optional","GRID_WSTRIDE", "frequency for dumping the grid");
+  keys.add("optional","GRID_WFILES", "dump grid for the bias, default names are used if GRID_WSTRIDE is used without GRID_WFILES.");
+  keys.add("optional","GRID_RFILES", "read grid for the bias");
+  keys.add("optional","ADAPTIVE","use a geometric (=GEOM) or diffusion (=DIFF) based hills width scheme. Sigma is one number that has distance units or timestep dimensions");
+  keys.add("optional","SIGMA_MAX","the upper bounds for the sigmas (in CV units) when using adaptive hills. Negative number means no bounds ");
+  keys.add("optional","SIGMA_MIN","the lower bounds for the sigmas (in CV units) when using adaptive hills. Negative number means no bounds ");
+  keys.addInputKeyword("numbered","PF", "scalar", "specify which CVs belong in a partitioned family. Once a PF is specified, all CVs in ARG must be placed in a PF even if there is one CV per PF”");
+  keys.add("optional","SELECTOR", "add forces and do update based on the value of SELECTOR");
+  keys.add("optional","SELECTOR_ID", "value of SELECTOR");
+  keys.add("optional","WALKERS_ID", "walker id");
+  keys.add("optional","WALKERS_N", "number of walkers");
+  keys.add("optional","WALKERS_DIR", "shared directory with the hills files from all the walkers");
+  keys.add("optional","WALKERS_RSTRIDE","stride for reading hills files");
+  keys.addFlag("WALKERS_MPI",false,"Switch on MPI version of multiple walkers - not compatible with WALKERS_* options other than WALKERS_DIR");
+  keys.add("optional","INTERVAL_MIN","one dimensional lower limits, outside the limits the system will not feel the biasing force.");
+  keys.add("optional","INTERVAL_MAX","one dimensional upper limits, outside the limits the system will not feel the biasing force.");
+  keys.use("RESTART");
+  keys.use("UPDATE_FROM");
+  keys.use("UPDATE_UNTIL");
+  keys.addDOI("10.1021/acs.jctc.5b00846");
+  keys.addDOI("10.1103/PhysRevLett.100.020603");
+  keys.addDOI("10.1021/ct3002464");
+  keys.addDOI("10.2174/1877946811202010079");
+  keys.addDOI("10.1021/acs.jctc.8b00448");
+  keys.addDOI("10.1021/jp054359r");
+}
+
+PBMetaD::PBMetaD(const ActionOptions& ao):
+  PLUMED_BIAS_INIT(ao),
+  kbt_(0.0),
+  stride_(0),
+  welltemp_(false),
+  biasf_(1.0),
+  isFirstStep_(true),
+  height0_(std::numeric_limits<double>::max()),
+  adaptive_(FlexibleBin::none),
+  grid_(false),
+  wgridstride_(0),
+  pf_n_(0), do_pf_(false),
+  mw_n_(1), mw_dir_(""), mw_id_(0), mw_rstride_(1),
+  walkers_mpi_(false), mpi_nw_(0),
+  gmin(pf_n_),
+  gmax(pf_n_),
+  gbin(pf_n_),
+  do_select_(false) {
+
+  // Parsing routines
+  parse_flexible_hills();
+  parse("FMT",fmt_);
+  parse_partitioned_families();
+  parse_sigma();
+  // note: HEIGHT is not compulsory, since one could use the TAU keyword, see below
+  parse("HEIGHT",height0_);
+  parse("PACE",stride_);
+  if(stride_<=0) error("frequency for hill addition is nonsensical");
+  parse_vector_hill_files();
+  parse_bias_factor();
+  parse_tau();
+  parse_walkers();
+  parse_grid();
+  doInt_.resize(pf_n_,false);
+  parse_interval();
+  // parse selector stuff
+  parse("SELECTOR", selector_);
+  if(selector_.length()>0) {
+    do_select_ = true;
+    select_value_ = 0; // set defalt value or it might be not initialized if the user does not pass SELECTOR_ID
+    parse("SELECTOR_ID", select_value_);
+  }
+
+  checkRead();
+
+  // initializing vector of hills
+  hills_.resize(pf_n_);
+ 
+  populate_logs();
+
+  init_grid();
+
+  init_file_descriptors();
+
+  comm.Barrier();
+
+  if(comm.Get_rank()==0 && walkers_mpi_) multi_sim_comm.Barrier();
+
+  init_hill_files();
+
+  dump_grid();
+
+  final_logs();
 
 }
 
