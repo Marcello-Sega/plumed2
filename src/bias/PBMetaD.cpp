@@ -390,84 +390,90 @@ void PBMetaD::parse_flexible_hills() {
 }
 
 void PBMetaD::parse_partitioned_families() { 
-  // Partitioned Families - fill with -1 to mark as invalid
+  // Reset
+  do_pf_ = false;
+  pf_n_  = 0;
+
+  // Partitioned Families / bias groups: fill with -1 to mark as invalid
   pfs_.assign(getNumberOfArguments(), -1);
-  pfhold_.resize(getNumberOfArguments());
+  pfhold_.assign(getNumberOfArguments(), nullptr);
+
+  // Parse grouping keywords.
+  // Prefer BIASARG<i> if present; otherwise fall back to PF<i>.
+  std::string usedKey = "";
   std::vector<Value*> familyargs;
 
-  // We support two mutually-exclusive grouping syntaxes:
-  //   - PF<i>=...      (existing)
-  //   - BIASARG<i>=... (new; groups ARG entries into independent bias components)
-  // Both populate the same internal family map (pfs_/pfhold_/pf_n_).
-  bool saw_pf=false;
-  bool saw_biasarg=false;
-  {
-    std::vector<Value*> tmp;
-    parseArgumentList("PF", 0, tmp);
-    if(!tmp.empty()) saw_pf=true;
-  }
-  {
-    std::vector<Value*> tmp;
-    parseArgumentList("BIASARG", 0, tmp);
-    if(!tmp.empty()) saw_biasarg=true;
-  }
-  if(saw_pf && saw_biasarg) {
-    error("Cannot use both PF and BIASARG in PBMETAD. Choose one grouping syntax.");
-  }
-  const std::string groupKey = saw_biasarg ? "BIASARG" : "PF";
-  for(int i = 0;; i++) {
-    parseArgumentList(groupKey, i, familyargs);
-    if (familyargs.empty()) {
-      break;
-    }
-
+  // Try BIASARG<i>
+  for(int i=0;; ++i) {
+    familyargs.clear();
+    parseArgumentList("BIASARG", i, familyargs);
+    if(familyargs.empty()) break;
+    if(usedKey.empty()) usedKey = "BIASARG";
     do_pf_ = true;
-    if(saw_biasarg) {
-      log << "  Identified Bias Group " << i << ":";
-    } else {
-      log << "  Identified Partitioned Family " << i << ":";
-    }
-    for (unsigned j = 0; j < familyargs.size(); j++) {
+    log << "  Identified Bias Group " << i << " (BIASARG):";
+    for(unsigned j=0; j<familyargs.size(); ++j) {
       log << " " << familyargs[j]->getName();
-      // loop through the argument list to make sure it exists and assign it
-      bool foundArg = false;
-      for (unsigned argnum = 0; argnum < getNumberOfArguments(); argnum++) {
-        if (familyargs[j]->getName() == getPntrToArgument(argnum)->getName()) {
-          foundArg = true;
-          if (pfs_[argnum] != -1) {
-            error(familyargs[j]->getName() + " already present in " + groupKey + std::to_string(pfs_[argnum]));
+      bool foundArg=false;
+      for(unsigned argnum=0; argnum<getNumberOfArguments(); ++argnum) {
+        if(familyargs[j]->getName()==getPntrToArgument(argnum)->getName()) {
+          foundArg=true;
+          if(pfs_[argnum]!=-1) {
+            error(familyargs[j]->getName() + " already present in " + usedKey + std::to_string(pfs_[argnum]));
           }
-          pfs_[argnum] = i;  // store the pf# for each cv
-          if (pfhold_[i] == nullptr) {
-            // if this is the first argument in the family, store a pointer for it (this is for HILLS & GRID files)
-            pfhold_[i] = getPntrToArgument(argnum);
-          }
+          pfs_[argnum]=i;
+          if(pfhold_[i]==nullptr) pfhold_[i]=getPntrToArgument(argnum);
         }
       }
-      if (!foundArg) {
-        error(familyargs[j]->getName() + " in " + groupKey + std::to_string(i) + " not found in ARG");
-      }
+      if(!foundArg) error(familyargs[j]->getName() + " in BIASARG" + std::to_string(i) + " not found in ARG");
     }
     log << "\n";
     pf_n_++;
   }
 
-  // if PF were specified, every argument gets treated as its own PF
-  if (!do_pf_) {
+  // If no BIASARG, try PF<i>
+  if(!do_pf_) {
+    for(int i=0;; ++i) {
+      familyargs.clear();
+      parseArgumentList("PF", i, familyargs);
+      if(familyargs.empty()) break;
+      if(usedKey.empty()) usedKey = "PF";
+      do_pf_ = true;
+      log << "  Identified Partitioned Family " << i << ":";
+      for(unsigned j=0; j<familyargs.size(); ++j) {
+        log << " " << familyargs[j]->getName();
+        bool foundArg=false;
+        for(unsigned argnum=0; argnum<getNumberOfArguments(); ++argnum) {
+          if(familyargs[j]->getName()==getPntrToArgument(argnum)->getName()) {
+            foundArg=true;
+            if(pfs_[argnum]!=-1) {
+              error(familyargs[j]->getName() + " already present in PF" + std::to_string(pfs_[argnum]));
+            }
+            pfs_[argnum]=i;
+            if(pfhold_[i]==nullptr) pfhold_[i]=getPntrToArgument(argnum);
+          }
+        }
+        if(!foundArg) error(familyargs[j]->getName() + " in PF" + std::to_string(i) + " not found in ARG");
+      }
+      log << "\n";
+      pf_n_++;
+    }
+  }
+
+  if(!do_pf_) {
+    // No grouping specified: each ARG entry is its own bias component
     pf_n_ = getNumberOfArguments();
-    for(unsigned i=0; i < pf_n_; i++) {
-      pfhold_[i] = getPntrToArgument(i);
-      pfs_[i] = i;
+    for(unsigned i=0; i<pf_n_; ++i) {
+      pfhold_[i]=getPntrToArgument(i);
+      pfs_[i]=i;
     }
   } else {
-    // If we are doing PF, make sure each argument got assigned to a family.
-    for (unsigned i = 0; i < getNumberOfArguments(); i++) {
-      if (pfs_[i] == -1) {
-        error(getPntrToArgument(i)->getName() + " was not assigned a PF");
-      }
+    // Ensure every ARG is assigned exactly once
+    for(unsigned i=0; i<getNumberOfArguments(); ++i) {
+      if(pfs_[i]==-1) error(getPntrToArgument(i)->getName() + " was not assigned a " + usedKey);
     }
   }
 }
+
 
 
 void PBMetaD::parse_sigma(){
@@ -1042,9 +1048,15 @@ void PBMetaD::registerKeywords(Keywords& keys) {
   keys.add("optional","ADAPTIVE","use a geometric (=GEOM) or diffusion (=DIFF) based hills width scheme. Sigma is one number that has distance units or timestep dimensions");
   keys.add("optional","SIGMA_MAX","the upper bounds for the sigmas (in CV units) when using adaptive hills. Negative number means no bounds ");
   keys.add("optional","SIGMA_MIN","the lower bounds for the sigmas (in CV units) when using adaptive hills. Negative number means no bounds ");
-  keys.addInputKeyword("numbered","PF", "scalar", "specify which CVs belong in a partitioned family. Once a PF is specified, all CVs in ARG must be placed in a PF even if there is one CV per PF”");
-  keys.addInputKeyword("numbered","BIASARG", "scalar", "group CVs/components into independent bias components. Each BIASARG<i> provides a list of ARG entries that belong to the i-th parallel bias. If any BIASARG is specified, every ARG must appear in exactly one BIASARG. SIGMA/FILE/GRID_* entries then correspond to BIASARG groups (one per group).");
-  keys.add("optional","SELECTOR", "add forces and do update based on the value of SELECTOR");
+keys.addInputKeyword("numbered","PF","scalar",
+  "Specify partitioned families. PF<i> lists the CVs in ARG that belong to the i-th family. "
+  "If any PF is used, every CV in ARG must appear in exactly one PF. "
+  "SIGMA/FILE/GRID_* entries then correspond to PF families (one per family).");
+keys.addInputKeyword("numbered","BIASARG","scalar",
+  "Group CVs/components into independent bias components. BIASARG<i> lists the ARG entries that belong "
+  "to the i-th parallel bias. If any BIASARG is used, every ARG must appear in exactly one BIASARG. "
+  "SIGMA/FILE/GRID_* entries then correspond to BIASARG groups (one per group).");
+    keys.add("optional","SELECTOR", "add forces and do update based on the value of SELECTOR");
   keys.add("optional","SELECTOR_ID", "value of SELECTOR");
   keys.add("optional","WALKERS_ID", "walker id");
   keys.add("optional","WALKERS_N", "number of walkers");
@@ -1131,41 +1143,117 @@ PBMetaD::PBMetaD(const ActionOptions& ao):
 }
 
 void PBMetaD::readGaussians(unsigned iarg, IFile *ifile) {
-  std::vector<double> center(1);
-  std::vector<double> sigma(1);
+  const int family = pfs_[iarg];
+
+  // Determine dimensionality of this family from the partition map (pfs_)
+  const unsigned ncv = getNumberOfArguments();
+  std::vector<unsigned> famIdx;
+  famIdx.reserve(ncv);
+  for(unsigned j=0; j<ncv; ++j) {
+    if(pfs_[j]==family) famIdx.push_back(j);
+  }
+  const unsigned d = famIdx.size();
+  plumed_assert(d>0);
+
+  // Buffers for one hill
+  std::vector<double> center(d);
+  std::vector<double> sigma(d);   // resized inside scanOneHill for multivariate
   double height;
   int nhills=0;
   bool multivariate=false;
-  int family=pfs_[iarg];
 
+  // Temporary Values used by scanOneHill to read fields and validate periodicity
   std::vector<Value> tmpvalues;
-  tmpvalues.push_back( Value( this, pfhold_[family]->getName(), false ) );
+  tmpvalues.reserve(d);
+  for(unsigned k=0; k<d; ++k) {
+    Value* ap = getPntrToArgument(famIdx[k]);
+    tmpvalues.push_back( Value( this, ap->getName(), false ) );
+  }
 
   while(scanOneHill(iarg,ifile,tmpvalues,center,sigma,height,multivariate)) {
-    ;
     nhills++;
     if(welltemp_) {
       height*=(biasf_-1.0)/biasf_;
     }
     addGaussian(family, Gaussian(center,sigma,height,multivariate));
   }
-  log.printf("      %d Gaussians read\n",nhills);
+  log.printf("      %d Gaussians read ",nhills);
 }
 
 void PBMetaD::writeGaussian(unsigned iarg, const Gaussian& hill, OFile *ofile) {
-  int family=pfs_[iarg];
+  const int family = pfs_[iarg];
+  const unsigned ncv = getNumberOfArguments();
+
+  // Collect all CVs belonging to this family, in argument order
+  std::vector<unsigned> famIdx;
+  famIdx.reserve(ncv);
+  for (unsigned j = 0; j < ncv; ++j) {
+    if (pfs_[j] == family) famIdx.push_back(j);
+  }
+  const unsigned d = famIdx.size();
+  plumed_assert(d > 0);
+
+  // Sanity check
+  plumed_assert(hill.center.size() == d);
+  if (!hill.multivariate) {
+    plumed_assert(hill.sigma.size() == d);
+  } else {
+    plumed_assert(hill.sigma.size() == d*(d+1)/2);
+  }
+
   ofile->printField("time",getTimeStep()*getStep());
-  ofile->printField(pfhold_[family],hill.center[0]);
+
+  // Print centers for all CVs in this family
+  for (unsigned k = 0; k < d; ++k) {
+    Value* argPtr = getPntrToArgument(famIdx[k]);
+    ofile->printField(argPtr, hill.center[k]);
+  }
+
   ofile->printField("kerneltype","stretched-gaussian");
+
   if(hill.multivariate) {
     ofile->printField("multivariate","true");
-    double lower = std::sqrt(1./hill.sigma[0]);
-    ofile->printField("sigma_"+pfhold_[family]->getName()+"_"+
-                      pfhold_[family]->getName(),lower);
+
+    // hill.sigma stores packed symmetric precision matrix (upper triangle)
+    Matrix<double> P(d, d);
+    unsigned kk = 0;
+    for (unsigned r = 0; r < d; ++r) {
+      for (unsigned c = r; c < d; ++c) {
+        P(r, c) = P(c, r) = hill.sigma[kk++];
+      }
+    }
+
+    // Invert precision to get covariance
+    Matrix<double> C(d, d);
+    Invert(P, C);
+
+    // Enforce symmetry (numerical safety)
+    for (unsigned r = 0; r < d; ++r) {
+      for (unsigned c = r; c < d; ++c) {
+        C(r, c) = C(c, r);
+      }
+    }
+
+    // Cholesky: C = L L^T
+    Matrix<double> L(d, d);
+    cholesky(C, L);
+
+    // Write lower-triangular entries in MetaD-compatible form sigma_ai_aj (i>=j)
+    for (unsigned c = 0; c < d; ++c) {
+      for (unsigned r = c; r < d; ++r) {
+        Value* ai = getPntrToArgument(famIdx[r]);
+        Value* aj = getPntrToArgument(famIdx[c]);
+        ofile->printField("sigma_" + ai->getName() + "_" + aj->getName(), L(r, c));
+      }
+    }
   } else {
     ofile->printField("multivariate","false");
-    ofile->printField("sigma_"+pfhold_[family]->getName(),hill.sigma[0]);
+    for (unsigned k = 0; k < d; ++k) {
+      Value* argPtr = getPntrToArgument(famIdx[k]);
+      ofile->printField("sigma_"+argPtr->getName(), hill.sigma[k]);
+    }
   }
+
   double height=hill.height;
   if(welltemp_) {
     height *= biasf_/(biasf_-1.0);
@@ -1179,9 +1267,17 @@ void PBMetaD::writeGaussian(unsigned iarg, const Gaussian& hill, OFile *ofile) {
 }
 
 void PBMetaD::addGaussian(unsigned iarg, const Gaussian& hill) {
+  const unsigned d = hill.center.size();
+
+  // Grid-based deposition is currently implemented only for 1D families
+  if(grid_ && d>1) {
+    error("GRID is not supported with multidimensional PBMetaD biases (family dimension > 1).");
+  }
+
   if(!grid_) {
     hills_[iarg].push_back(hill);
   } else {
+    // 1D grid deposition (legacy)
     std::vector<unsigned> nneighb=getGaussianSupport(iarg, hill);
     std::vector<Grid::index_t> neighbors=BiasGrids_[iarg]->getNeighbors(hill.center,nneighb);
     std::vector<double> der(1);
@@ -1216,6 +1312,8 @@ void PBMetaD::addGaussian(unsigned iarg, const Gaussian& hill) {
 }
 
 std::vector<unsigned> PBMetaD::getGaussianSupport(unsigned iarg, const Gaussian& hill) {
+  // Only meaningful for 1D grid deposition
+  plumed_assert(hill.center.size()==1);
   std::vector<unsigned> nneigh;
   double cutoff;
   if(hill.multivariate) {
@@ -1242,8 +1340,16 @@ std::vector<unsigned> PBMetaD::getGaussianSupport(unsigned iarg, const Gaussian&
 
 double PBMetaD::getBiasAndDerivatives(unsigned iarg, const std::vector<double>& cv, double* der) {
   double bias=0.0;
-  int family = pfs_[iarg];
-  if(!grid_) {
+  const int family = pfs_[iarg];
+
+  // Determine family dimensionality
+  const unsigned ncv = getNumberOfArguments();
+  unsigned d=0;
+  for(unsigned j=0; j<ncv; ++j) if(pfs_[j]==family) ++d;
+  plumed_assert(d>0);
+  plumed_assert(cv.size()==d);
+
+  if(!grid_ || d>1) {
     unsigned stride=comm.Get_size();
     unsigned rank=comm.Get_rank();
     for(unsigned i=rank; i<hills_[family].size(); i+=stride) {
@@ -1251,9 +1357,10 @@ double PBMetaD::getBiasAndDerivatives(unsigned iarg, const std::vector<double>& 
     }
     comm.Sum(bias);
     if(der) {
-      comm.Sum(der,1);
+      comm.Sum(der,d);
     }
   } else {
+    // 1D grid path (legacy)
     if(der) {
       std::vector<double> vder(1);
       bias = BiasGrids_[family]->getValueAndDerivatives(cv,vder);
@@ -1268,41 +1375,85 @@ double PBMetaD::getBiasAndDerivatives(unsigned iarg, const std::vector<double>& 
 
 double PBMetaD::evaluateGaussian(unsigned iarg, const std::vector<double>& cv, const Gaussian& hill, double* der) {
   double bias=0.0;
-// I use a pointer here because cv is const (and should be const)
-// but when using doInt it is easier to locally replace cv[0] with
-// the upper/lower limit in case it is out of range
-  const double *pcv=NULL;
-  double tmpcv[1]; // tmp array with cv (to be used with doInt_)
-  tmpcv[0]=cv[0];
-  bool isOutOfInt = false;
-  if(doInt_[iarg]) {
-    if(cv[0]<lowI_[iarg]) {
-      tmpcv[0]=lowI_[iarg];
-      isOutOfInt = true;
-    } else if(cv[0]>uppI_[iarg]) {
-      tmpcv[0]=uppI_[iarg];
-      isOutOfInt = true;
+  const int family = pfs_[iarg];
+
+  // Collect all CV indices in this family
+  const unsigned ncv = getNumberOfArguments();
+  std::vector<unsigned> famIdx;
+  famIdx.reserve(ncv);
+  for(unsigned j=0; j<ncv; ++j) {
+    if(pfs_[j]==family) famIdx.push_back(j);
+  }
+  const unsigned d = famIdx.size();
+  plumed_assert(d>0);
+  plumed_assert(cv.size()==d);
+
+  // Locally clamp to integration interval if requested (per-dimension)
+  std::vector<double> tmpcv(cv);
+  std::vector<bool> clamped(d,false);
+  if(doInt_[family]) {
+    // NOTE: doInt_/lowI_/uppI_ are per-family in the current PBMetaD code path
+    // (indexing uses iarg in old 1D logic, but these arrays are sized by pf_n_)
+    for(unsigned k=0; k<d; ++k) {
+      if(tmpcv[k] < lowI_[family]) { tmpcv[k]=lowI_[family]; clamped[k]=true; }
+      else if(tmpcv[k] > uppI_[family]) { tmpcv[k]=uppI_[family]; clamped[k]=true; }
     }
   }
-  pcv=&(tmpcv[0]);
 
   if(hill.multivariate) {
-    double dp  = difference(iarg, hill.center[0], pcv[0]);
-    double dp2 = 0.5 * dp * dp * hill.sigma[0];
+    // hill.sigma stores packed upper-triangular precision matrix P = Sigma^{-1}
+    plumed_assert(hill.sigma.size()==d*(d+1)/2);
+
+    // Compute delta
+    std::vector<double> delta(d,0.0);
+    for(unsigned k=0; k<d; ++k) {
+      delta[k] = difference(famIdx[k], hill.center[k], tmpcv[k]);
+    }
+
+    // Compute P*delta and quadratic form delta^T P delta
+    std::vector<double> Pdelta(d,0.0);
+    double quad=0.0;
+    unsigned kk=0;
+    for(unsigned r=0; r<d; ++r) {
+      for(unsigned c=r; c<d; ++c) {
+        const double prc = hill.sigma[kk++];
+        quad += (r==c) ? prc*delta[r]*delta[c] : 2.0*prc*delta[r]*delta[c];
+        Pdelta[r] += prc*delta[c];
+        Pdelta[c] += prc*delta[r];
+      }
+    }
+
+    const double dp2 = 0.5*quad;
     if(dp2<dp2cutoff) {
       bias = hill.height*std::exp(-dp2);
-      if(der && !isOutOfInt) {
-        der[0] += -bias * dp * hill.sigma[0] * stretchA;
+      if(der) {
+        for(unsigned k=0; k<d; ++k) {
+          if(!clamped[k]) der[k] += -bias * Pdelta[k] * stretchA;
+        }
       }
       bias=stretchA*bias+hill.height*stretchB;
     }
+
   } else {
-    double dp  = difference(iarg, hill.center[0], pcv[0]) * hill.invsigma[0];
-    double dp2 = 0.5 * dp * dp;
+    // Diagonal widths: hill.sigma[k] is sigma_k, hill.invsigma[k] is 1/sigma_k
+    plumed_assert(hill.sigma.size()==d);
+    plumed_assert(hill.invsigma.size()==d);
+
+    double dp2=0.0;
+    std::vector<double> dp(d,0.0);
+    for(unsigned k=0; k<d; ++k) {
+      const double dpk = difference(famIdx[k], hill.center[k], tmpcv[k]) * hill.invsigma[k];
+      dp[k]=dpk;
+      dp2 += dpk*dpk;
+    }
+    dp2 *= 0.5;
+
     if(dp2<dp2cutoff) {
       bias = hill.height*std::exp(-dp2);
-      if(der && !isOutOfInt) {
-        der[0] += -bias * dp * hill.invsigma[0] * stretchA;
+      if(der) {
+        for(unsigned k=0; k<d; ++k) {
+          if(!clamped[k]) der[k] += -bias * dp[k] * hill.invsigma[k] * stretchA;
+        }
       }
       bias=stretchA*bias+hill.height*stretchB;
     }
@@ -1318,25 +1469,34 @@ void PBMetaD::calculate() {
     error("ADAPTIVE=DIFF is not compatible with replica exchange");
   }
 
-  std::vector<double> cv(1);
-  double der[1];
-  std::vector<double> bias(getNumberOfArguments());
-  std::vector<double> deriv(getNumberOfArguments());
+  const unsigned narg = getNumberOfArguments();
+  const unsigned nfam = pf_n_;
 
-  double ncv = (double) getNumberOfArguments();
+  std::vector<double> fam_bias(nfam, 0.0);
+  std::vector<std::vector<double>> fam_der(nfam);
+
   double bmin = 1.0e+19;
-  for(unsigned i=0; i<getNumberOfArguments(); ++i) {
-    cv[0]    = getArgument(i);
-    der[0]   = 0.0;
-    bias[i]  = getBiasAndDerivatives(i, cv, der);
-    deriv[i] = der[0];
-    if(bias[i] < bmin) {
-      bmin = bias[i];
-    }
+
+  // Compute bias + derivatives per family using the full CV vector of that family
+  for(unsigned f=0; f<nfam; ++f) {
+    std::vector<unsigned> famIdx;
+    famIdx.reserve(narg);
+    for(unsigned j=0; j<narg; ++j) if(static_cast<unsigned>(pfs_[j])==f) famIdx.push_back(j);
+    plumed_assert(!famIdx.empty());
+
+    const unsigned d = famIdx.size();
+    std::vector<double> cv(d);
+    fam_der[f].assign(d, 0.0);
+    for(unsigned k=0; k<d; ++k) cv[k] = getArgument(famIdx[k]);
+
+    fam_bias[f] = getBiasAndDerivatives(famIdx[0], cv, fam_der[f].data());
+    if(fam_bias[f] < bmin) bmin = fam_bias[f];
   }
-  double ene = 0.;
-  for(unsigned i=0; i<getNumberOfArguments(); ++i) {
-    ene += std::exp((-bias[i]+bmin)/kbt_);
+
+  // Compute PBMetaD log-sum-exp over families
+  double ene = 0.0;
+  for(unsigned f=0; f<nfam; ++f) {
+    ene += std::exp((-fam_bias[f]+bmin)/kbt_);
   }
 
   // set Forces - set them to zero if SELECTOR is active
@@ -1345,22 +1505,27 @@ void PBMetaD::calculate() {
   }
 
   if(!do_select_ || select_value_==current_value_) {
-    for(unsigned i=0; i<getNumberOfArguments(); ++i) {
-      const double force = - std::exp((-bias[i]+bmin)/kbt_) / (ene) * deriv[i];
-      setOutputForce(i, force);
-    }
-  }
+    for(unsigned f=0; f<nfam; ++f) {
+      const double w = std::exp((-fam_bias[f]+bmin)/kbt_) / ene;
 
-  if(do_select_ && select_value_!=current_value_) {
-    for(unsigned i=0; i<getNumberOfArguments(); ++i) {
-      setOutputForce(i, 0.0);
+      // distribute to member arguments
+      std::vector<unsigned> famIdx;
+      famIdx.reserve(narg);
+      for(unsigned j=0; j<narg; ++j) if(static_cast<unsigned>(pfs_[j])==f) famIdx.push_back(j);
+
+      for(unsigned k=0; k<famIdx.size(); ++k) {
+        const unsigned i = famIdx[k];
+        const double force = - w * fam_der[f][k];
+        setOutputForce(i, force);
+      }
     }
+  } else {
+    for(unsigned i=0; i<narg; ++i) setOutputForce(i, 0.0);
   }
 
   // set bias
-  ene = -kbt_ * (std::log(ene) - std::log(ncv)) + bmin;
+  ene = -kbt_ * (std::log(ene) - std::log(static_cast<double>(nfam))) + bmin;
   setBias(ene);
-  printf("AAARGHHH %f %f\n",ene,kbt_);
 }
 
 void PBMetaD::update() {
@@ -1385,6 +1550,74 @@ void PBMetaD::update() {
   }
 
   if(nowAddAHill && (!do_select_ || select_value_==current_value_)) {
+
+  // Check if any family has dimension > 1
+  const unsigned narg = getNumberOfArguments();
+  const unsigned nfam = pf_n_;
+  bool anyMultiDim=false;
+  for(unsigned f=0; f<nfam; ++f) {
+    unsigned d=0;
+    for(unsigned j=0; j<narg; ++j) if(static_cast<unsigned>(pfs_[j])==f) ++d;
+    if(d>1) { anyMultiDim=true; break; }
+  }
+
+  // Multidimensional families: deposit one hill per family using the full CV vector
+  if(anyMultiDim) {
+    if(grid_) error("GRID is not supported with multidimensional PBMetaD biases (family dimension > 1).");
+    if(walkers_mpi_) error("Multiple-walkers MPI mode is not yet supported with multidimensional PBMetaD biases.");
+    if(mw_n_>1) error("Multiple-walkers file sharing is not yet supported with multidimensional PBMetaD biases.");
+    if(adaptive_!=FlexibleBin::none) error("ADAPTIVE hills are not yet supported with multidimensional PBMetaD biases.");
+
+    std::vector<double> fam_bias(nfam, 0.0);
+    std::vector<std::vector<double>> fam_center(nfam);
+    std::vector<double> fam_height(nfam, 0.0);
+
+    double norm = 0.0;
+    double bmin = 1.0e+19;
+
+    // compute family biases
+    for(unsigned f=0; f<nfam; ++f) {
+      std::vector<unsigned> famIdx;
+      famIdx.reserve(narg);
+      for(unsigned j=0; j<narg; ++j) if(static_cast<unsigned>(pfs_[j])==f) famIdx.push_back(j);
+      plumed_assert(!famIdx.empty());
+
+      const unsigned d = famIdx.size();
+      fam_center[f].resize(d);
+      for(unsigned k=0; k<d; ++k) fam_center[f][k] = getArgument(famIdx[k]);
+
+      fam_bias[f] = getBiasAndDerivatives(famIdx[0], fam_center[f]);
+      if(fam_bias[f] < bmin) bmin = fam_bias[f];
+    }
+
+    // heights + normalization over families
+    for(unsigned f=0; f<nfam; ++f) {
+      const double h = std::exp((-fam_bias[f]+bmin)/kbt_);
+      fam_height[f] = h;
+      norm += h;
+    }
+    for(unsigned f=0; f<nfam; ++f) {
+      fam_height[f] *= height0_ / norm;
+      if(welltemp_) {
+        fam_height[f] *= std::exp(-fam_bias[f]/(kbt_*(biasf_-1.0)));
+      }
+    }
+
+    // deposit one (diagonal) Gaussian per family
+    for(unsigned f=0; f<nfam; ++f) {
+      const unsigned d = fam_center[f].size();
+      std::vector<double> sigma_tmp(d, sigma0_[f]);
+      Gaussian newhill = Gaussian(fam_center[f], sigma_tmp, fam_height[f], /*multivariate=*/false);
+      addGaussian(f, newhill);
+
+      // write using first member of family
+      unsigned firstArg=0;
+      for(unsigned j=0; j<narg; ++j) { if(static_cast<unsigned>(pfs_[j])==f) { firstArg=j; break; } }
+      writeGaussian(firstArg, newhill, hillsOfiles_[f].get());
+    }
+
+  } else {
+    // --- Legacy 1D-per-family path (original behavior) ---
     // get all biases and heights
     std::vector<double> cv(getNumberOfArguments());
     std::vector<double> bias(getNumberOfArguments());
@@ -1476,6 +1709,7 @@ void PBMetaD::update() {
       }
     }
   }
+}
 
   // write grid files
   if(wgridstride_>0 && (getStep()%wgridstride_==0 || getCPT())) {
@@ -1527,65 +1761,116 @@ void PBMetaD::update() {
 bool PBMetaD::scanOneHill(unsigned iarg, IFile *ifile, std::vector<Value> &tmpvalues, std::vector<double> &center, std::vector<double> &sigma, double &height, bool &multivariate) {
   double dummy;
   multivariate=false;
-  Value* argPtr = pfhold_[pfs_[iarg]];
-  if(ifile->scanField("time",dummy)) {
-    ifile->scanField( &tmpvalues[0] );
-    if( tmpvalues[0].isPeriodic() && ! argPtr->isPeriodic() ) {
-      error("in hills file periodicity for variable " + tmpvalues[0].getName() + " does not match periodicity in input");
-    } else if( tmpvalues[0].isPeriodic() ) {
-      std::string imin, imax;
-      tmpvalues[0].getDomain( imin, imax );
-      std::string rmin, rmax;
-      argPtr->getDomain( rmin, rmax );
-      if( imin!=rmin || imax!=rmax ) {
-        error("in hills file periodicity for variable " + tmpvalues[0].getName() + " does not match periodicity in input");
-      }
+
+  const int family = pfs_[iarg];
+
+  // Collect all CVs belonging to this family, in argument order
+  const unsigned ncv = getNumberOfArguments();
+  std::vector<unsigned> famIdx;
+  famIdx.reserve(ncv);
+  for (unsigned j = 0; j < ncv; ++j) {
+    if (pfs_[j] == family) famIdx.push_back(j);
+  }
+  const unsigned d = famIdx.size();
+  plumed_assert(d > 0);
+
+  // Ensure buffers match the family dimensionality
+  if (tmpvalues.size() != d) {
+    tmpvalues.clear();
+    tmpvalues.reserve(d);
+    for (unsigned k = 0; k < d; ++k) {
+      Value* ap = getPntrToArgument(famIdx[k]);
+      tmpvalues.push_back( Value(this, ap->getName(), false) );
     }
-    center[0]=tmpvalues[0].get();
-    std::string ktype="stretched-gaussian";
-    if( ifile->FieldExist("kerneltype") ) {
-      ifile->scanField("kerneltype",ktype);
+  }
+  if (center.size() != d) center.assign(d, 0.0);
+  if (sigma.size()  != d) sigma.assign(d, 0.0);  // resized later for multivariate
+
+  if(ifile->scanField("time",dummy)) {
+
+    // Read centers + periodicity checks for all CVs in family
+    for (unsigned k = 0; k < d; ++k) {
+      Value* argPtr = getPntrToArgument(famIdx[k]);
+      ifile->scanField(&tmpvalues[k]);
+
+      if (tmpvalues[k].isPeriodic() && !argPtr->isPeriodic()) {
+        error("in hills file periodicity for variable " + tmpvalues[k].getName() +
+              " does not match periodicity in input");
+      } else if (tmpvalues[k].isPeriodic()) {
+        std::string imin, imax;
+        tmpvalues[k].getDomain(imin, imax);
+        std::string rmin, rmax;
+        argPtr->getDomain(rmin, rmax);
+        if (imin != rmin || imax != rmax) {
+          error("in hills file periodicity for variable " + tmpvalues[k].getName() +
+                " does not match periodicity in input");
+        }
+      }
+      center[k] = tmpvalues[k].get();
     }
 
-    if( ktype=="gaussian" ) {
+    // kerneltype
+    std::string ktype="stretched-gaussian";
+    if(ifile->FieldExist("kerneltype")) ifile->scanField("kerneltype", ktype);
+    if(ktype=="gaussian") {
       noStretchWarning();
-    } else if( ktype!="stretched-gaussian") {
+    } else if(ktype!="stretched-gaussian") {
       error("non Gaussian kernels are not supported in MetaD");
     }
 
+    // multivariate flag
     std::string sss;
-    ifile->scanField("multivariate",sss);
-    if(sss=="true") {
-      multivariate=true;
-    } else if(sss=="false") {
-      multivariate=false;
-    } else {
-      plumed_merror("cannot parse multivariate = "+ sss);
-    }
+    ifile->scanField("multivariate", sss);
+    if      (sss=="true")  multivariate=true;
+    else if (sss=="false") multivariate=false;
+    else plumed_merror("cannot parse multivariate = " + sss);
+
     if(multivariate) {
-      ifile->scanField("sigma_"+argPtr->getName()+"_"+
-                       argPtr->getName(),sigma[0]);
-      sigma[0] = 1./(sigma[0]*sigma[0]);
+      // Read Cholesky factor L of covariance via fields sigma_ai_aj (i>=j),
+      // then store packed upper triangle of precision P = (L L^T)^-1 in sigma[]
+      sigma.resize(d*(d+1)/2);
+
+      Matrix<double> upper(d,d);
+      Matrix<double> lower(d,d);
+      for(unsigned i=0; i<d; i++) {
+        for(unsigned j=0; j<d-i; j++) {
+          Value* ai = getPntrToArgument(famIdx[j+i]);
+          Value* aj = getPntrToArgument(famIdx[j]);
+          ifile->scanField("sigma_"+ai->getName()+"_"+aj->getName(), lower(j+i,j));
+          upper(j,j+i) = lower(j+i,j);
+        }
+      }
+
+      Matrix<double> cov(d,d);
+      Matrix<double> invcov(d,d);
+      mult(lower, upper, cov);
+      Invert(cov, invcov);
+
+      unsigned kk=0;
+      for(unsigned r=0; r<d; r++) {
+        for(unsigned c=r; c<d; c++) {
+          sigma[kk++] = invcov(r,c);
+        }
+      }
+
     } else {
-      ifile->scanField("sigma_"+argPtr->getName(),sigma[0]);
+      for(unsigned k=0; k<d; ++k) {
+        Value* argPtr = getPntrToArgument(famIdx[k]);
+        ifile->scanField("sigma_"+argPtr->getName(), sigma[k]);
+      }
     }
-    ifile->scanField("height",height);
-    ifile->scanField("biasf",dummy);
-    if(ifile->FieldExist("clock")) {
-      ifile->scanField("clock",dummy);
-    }
-    if(ifile->FieldExist("lower_int")) {
-      ifile->scanField("lower_int",dummy);
-    }
-    if(ifile->FieldExist("upper_int")) {
-      ifile->scanField("upper_int",dummy);
-    }
+
+    ifile->scanField("height", height);
+    ifile->scanField("biasf", dummy);
+    if(ifile->FieldExist("clock"))     ifile->scanField("clock", dummy);
+    if(ifile->FieldExist("lower_int")) ifile->scanField("lower_int", dummy);
+    if(ifile->FieldExist("upper_int")) ifile->scanField("upper_int", dummy);
+
     ifile->scanField();
     return true;
   } else {
     return false;
   }
-
 }
 
 bool PBMetaD::checkNeedsGradients()const {
